@@ -1,10 +1,12 @@
 name: Build Pi 5 Docker Image
 
-# Builds an arm64 (Raspberry Pi 5 / Cortex-A76) Docker image from the existing
-# Dockerfile and publishes it to GHCR. Run this on your Pi 5 via docker-compose
-# (see docs/pi5-deploy/README.md for the compose + Watchtower auto-update setup)
-# rather than flashing a custom OS image — this repo already ships as a
-# container, and the Dockerfile already handles TARGETPLATFORM=linux/arm64.
+# Builds an arm64 (Raspberry Pi 5 / Cortex-A76) Docker image and publishes it to
+# GHCR. Normally builds this repo's feat-readarr branch and tags it pi5-latest.
+#
+# The source_repo/source_ref inputs let you build from a DIFFERENT repo/ref
+# instead (e.g. the upstream jabloink/seerr at tag v3.2.0, as a migration
+# bridge when a newer build's database schema guard refuses to auto-upgrade
+# from an older one). Bridge builds never touch pi5-latest.
 
 on:
   push:
@@ -13,22 +15,64 @@ on:
     paths-ignore:
       - '**.md'
       - 'docs/**'
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      source_repo:
+        description: 'Repo to build from (owner/name). Leave blank for this repo.'
+        required: false
+        default: ''
+      source_ref:
+        description: 'Branch/tag/SHA to build. Leave blank for feat-readarr.'
+        required: false
+        default: ''
 
 permissions:
   contents: read
   packages: write
 
 concurrency:
-  group: build-pi5-image-${{ github.ref }}
+  group: build-pi5-image-${{ github.ref }}-${{ github.event.inputs.source_ref }}
   cancel-in-progress: true
 
 jobs:
   build-and-push:
     runs-on: ubuntu-latest
     steps:
+      - name: Resolve build source and tags
+        id: resolve
+        run: |
+          SOURCE_REPO="${{ github.event.inputs.source_repo }}"
+          SOURCE_REF="${{ github.event.inputs.source_ref }}"
+          IS_BRIDGE="false"
+
+          if [ -n "$SOURCE_REPO" ] || [ -n "$SOURCE_REF" ]; then
+            IS_BRIDGE="true"
+          fi
+
+          SOURCE_REPO="${SOURCE_REPO:-${{ github.repository }}}"
+          SOURCE_REF="${SOURCE_REF:-feat-readarr}"
+
+          # Docker tags can't contain '/'; a cross-repo bridge tag is prefixed
+          # with the source repo's owner so e.g. jabloink/seerr@v3.2.0 doesn't
+          # collide with a same-named ref in this repo.
+          SAFE_REF=$(echo "$SOURCE_REF" | tr '/' '-')
+          if [ "$IS_BRIDGE" = "true" ]; then
+            OWNER=$(echo "$SOURCE_REPO" | cut -d/ -f1)
+            VERSION_TAG="pi5-bridge-${OWNER}-${SAFE_REF}"
+          else
+            VERSION_TAG="pi5-${SAFE_REF}"
+          fi
+
+          echo "source_repo=$SOURCE_REPO" >> "$GITHUB_OUTPUT"
+          echo "source_ref=$SOURCE_REF" >> "$GITHUB_OUTPUT"
+          echo "is_bridge=$IS_BRIDGE" >> "$GITHUB_OUTPUT"
+          echo "version_tag=$VERSION_TAG" >> "$GITHUB_OUTPUT"
+
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          repository: ${{ steps.resolve.outputs.source_repo }}
+          ref: ${{ steps.resolve.outputs.source_ref }}
 
       - name: Set up QEMU (for cross-building arm64 on an x86 runner)
         uses: docker/setup-qemu-action@v3
@@ -45,25 +89,16 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Derive image tags
-        id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ghcr.io/${{ github.repository }}
-          tags: |
-            type=raw,value=pi5-latest
-            type=raw,value=pi5-${{ github.ref_name }}
-            type=sha,prefix=pi5-,format=short
-
       - name: Build and push (linux/arm64 only)
         uses: docker/build-push-action@v6
         with:
           context: .
           platforms: linux/arm64
           push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
+          tags: |
+            ghcr.io/${{ github.repository }}:${{ steps.resolve.outputs.version_tag }}
+            ${{ steps.resolve.outputs.is_bridge == 'false' && format('ghcr.io/{0}:pi5-latest', github.repository) || '' }}
           build-args: |
-            COMMIT_TAG=${{ github.sha }}
+            COMMIT_TAG=${{ steps.resolve.outputs.source_ref }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
