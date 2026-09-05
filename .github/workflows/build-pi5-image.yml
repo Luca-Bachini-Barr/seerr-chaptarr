@@ -52,6 +52,11 @@ jobs:
           SOURCE_REPO="${SOURCE_REPO:-${{ github.repository }}}"
           SOURCE_REF="${SOURCE_REF:-feat-readarr}"
 
+          # GHCR requires lowercase repository paths; github.repository preserves
+          # the actual account casing (e.g. "Luca-Bachini-Barr"), which buildx
+          # rejects outright ("repository name must be lowercase").
+          IMAGE_REPO_LOWER=$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
+
           # Docker tags can't contain '/'; a cross-repo bridge tag is prefixed
           # with the source repo's owner so e.g. jabloink/seerr@v3.2.0 doesn't
           # collide with a same-named ref in this repo.
@@ -67,6 +72,7 @@ jobs:
           echo "source_ref=$SOURCE_REF" >> "$GITHUB_OUTPUT"
           echo "is_bridge=$IS_BRIDGE" >> "$GITHUB_OUTPUT"
           echo "version_tag=$VERSION_TAG" >> "$GITHUB_OUTPUT"
+          echo "image_repo_lower=$IMAGE_REPO_LOWER" >> "$GITHUB_OUTPUT"
 
       - name: Checkout
         uses: actions/checkout@v4
@@ -96,8 +102,8 @@ jobs:
           platforms: linux/arm64
           push: true
           tags: |
-            ghcr.io/${{ github.repository }}:${{ steps.resolve.outputs.version_tag }}
-            ${{ steps.resolve.outputs.is_bridge == 'false' && format('ghcr.io/{0}:pi5-latest', github.repository) || '' }}
+            ghcr.io/${{ steps.resolve.outputs.image_repo_lower }}:${{ steps.resolve.outputs.version_tag }}
+            ${{ steps.resolve.outputs.is_bridge == 'false' && format('ghcr.io/{0}:pi5-latest', steps.resolve.outputs.image_repo_lower) || '' }}
           build-args: |
             COMMIT_TAG=${{ steps.resolve.outputs.source_ref }}
           cache-from: type=gha
