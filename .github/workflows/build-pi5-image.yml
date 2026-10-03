@@ -96,6 +96,7 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build and push (linux/arm64 only)
+        id: build
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -108,3 +109,42 @@ jobs:
             COMMIT_TAG=${{ steps.resolve.outputs.source_ref }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      # Posts a build result card to Discord #github. Uses the DISCORD_WEBHOOK_URL
+      # repo secret; if it isn't set, this step skips so builds never fail on it.
+      - name: Notify Discord
+        if: always()
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          JOB_STATUS: ${{ job.status }}
+          IMAGE: ghcr.io/${{ steps.resolve.outputs.image_repo_lower }}
+          VERSION_TAG: ${{ steps.resolve.outputs.version_tag }}
+          IS_BRIDGE: ${{ steps.resolve.outputs.is_bridge }}
+          SOURCE: ${{ steps.resolve.outputs.source_repo }}@${{ steps.resolve.outputs.source_ref }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          EVENT: ${{ github.event_name }}
+        run: |
+          [ -n "$DISCORD_WEBHOOK_URL" ] || { echo "DISCORD_WEBHOOK_URL not set; skipping"; exit 0; }
+          COMMIT="$(git log -1 --format='%h %s' 2>/dev/null | cut -c1-200)"
+          TAGS="\`$IMAGE:$VERSION_TAG\`"
+          [ "$IS_BRIDGE" = "false" ] && TAGS="$TAGS"$'\n'"\`$IMAGE:pi5-latest\`"
+          case "$JOB_STATUS" in
+            success)   TITLE="✅ seerr-chaptarr: Pi 5 image built"; COLOR=3066993 ;;
+            cancelled) TITLE="⚪ seerr-chaptarr: build cancelled";   COLOR=9807270 ;;
+            *)         TITLE="❌ seerr-chaptarr: Pi 5 build FAILED";  COLOR=15158332 ;;
+          esac
+          jq -n --arg t "$TITLE" --argjson c "$COLOR" --arg url "$RUN_URL" --arg tags "$TAGS" \
+                --arg commit "${COMMIT:-n/a}" --arg src "$SOURCE" --arg ev "$EVENT" --arg d "${DIGEST:-n/a}" '{
+            username: "GitHub Builds",
+            avatar_url: "https://cdn.jsdelivr.net/gh/homarr-labs/dashboard-icons/png/github.png",
+            embeds: [{ title: $t, url: $url, color: $c,
+              fields: [
+                {name: "Image", value: $tags},
+                {name: "Commit", value: $commit},
+                {name: "Source", value: $src, inline: true},
+                {name: "Trigger", value: $ev, inline: true},
+                {name: "Digest", value: ("`" + ($d[0:19]) + "…`"), inline: true}
+              ],
+              footer: {text: "Gantry will roll seerr_fork onto pi5-latest within ~5h"} }]
+          }' | curl -sS -m 20 -H "Content-Type: application/json" -d @- "$DISCORD_WEBHOOK_URL"
