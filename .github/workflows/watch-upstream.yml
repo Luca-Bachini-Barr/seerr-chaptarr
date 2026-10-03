@@ -1,0 +1,90 @@
+name: Watch upstream
+
+# Daily check for new upstream work that this fork may need to pick up:
+#   - a new seerr-team/seerr release (the original project), and
+#   - new commits on jabloink/seerr feat-readarr (the book/Readarr branch this
+#     fork's work is based on).
+# feat-readarr here is a rebased copy of that work, so syncing is a manual
+# rebase. This job only ALERTS (Discord #github); it never changes feat-readarr.
+# Last-alerted state is kept in state.json on the `upstream-watch` branch.
+
+on:
+  schedule:
+    - cron: '23 7 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: watch-upstream
+  cancel-in-progress: false
+
+jobs:
+  watch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check upstream and notify
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          REPO: ${{ github.repository }}
+          OWNER: ${{ github.repository_owner }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          api() { curl -fsS -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" "https://api.github.com/$1"; }
+
+          REL_JSON=$(api repos/seerr-team/seerr/releases/latest)
+          REL=$(jq -r .tag_name <<<"$REL_JSON"); REL_URL=$(jq -r .html_url <<<"$REL_JSON")
+          REL_DATE=$(jq -r '.published_at[0:10]' <<<"$REL_JSON")
+          J_JSON=$(api repos/jabloink/seerr/commits/feat-readarr)
+          JSHA=$(jq -r .sha <<<"$J_JSON")
+          JMSG=$(jq -r '.commit.message | split("\n")[0]' <<<"$J_JSON" | cut -c1-120)
+          JDATE=$(jq -r '.commit.author.date[0:10]' <<<"$J_JSON")
+          BEHIND=$(api "repos/seerr-team/seerr/compare/develop...${OWNER}:seerr-chaptarr:feat-readarr" | jq -r .behind_by)
+
+          PREV='{}'
+          if STATE=$(api "repos/$REPO/contents/state.json?ref=upstream-watch" 2>/dev/null); then
+            PREV=$(jq -r .content <<<"$STATE" | base64 -d); STATE_SHA=$(jq -r .sha <<<"$STATE")
+          fi
+          PREL=$(jq -r '.seerr_release // ""' <<<"$PREV"); PJSHA=$(jq -r '.jabloink_sha // ""' <<<"$PREV")
+
+          NEW_REL=false; NEW_J=false
+          [ "$REL" != "$PREL" ] && NEW_REL=true
+          [ "$JSHA" != "$PJSHA" ] && NEW_J=true
+          echo "seerr-team latest=$REL (seen: ${PREL:-none})  jabloink=$JSHA (seen: ${PJSHA:-none})  fork behind develop by $BEHIND"
+          if [ "$NEW_REL" = false ] && [ "$NEW_J" = false ]; then echo "Nothing new."; exit 0; fi
+
+          if [ -n "$DISCORD_WEBHOOK_URL" ]; then
+            jq -n --arg rel "$REL" --arg relurl "$REL_URL" --arg reldate "$REL_DATE" --argjson newrel "$NEW_REL" \
+                  --arg jsha "${JSHA:0:7}" --arg jmsg "$JMSG" --arg jdate "$JDATE" --argjson newj "$NEW_J" \
+                  --arg behind "$BEHIND" --arg run "$RUN_URL" '{
+              username: "GitHub Builds",
+              avatar_url: "https://cdn.jsdelivr.net/gh/homarr-labs/dashboard-icons/png/github.png",
+              embeds: [{
+                title: "🔔 seerr-chaptarr: upstream has moved",
+                url: $run, color: 15844367,
+                description: "feat-readarr needs a manual rebase to pick this up. Push to feat-readarr afterwards and the Pi 5 image builds automatically.",
+                fields: [
+                  {name: ((if $newrel then "🆕 " else "" end) + "seerr-team/seerr latest release"), value: ("[" + $rel + "](" + $relurl + ") (" + $reldate + ")"), inline: true},
+                  {name: ((if $newj then "🆕 " else "" end) + "jabloink feat-readarr"), value: ("`" + $jsha + "` " + $jmsg + " (" + $jdate + ")"), inline: true},
+                  {name: "Fork vs seerr-team develop", value: ($behind + " commits behind")}
+                ] }]
+            }' | curl -sS -m 20 -H "Content-Type: application/json" -d @- "$DISCORD_WEBHOOK_URL"
+          else
+            echo "DISCORD_WEBHOOK_URL not set; not alerting (state still updated)."
+          fi
+
+          # Record what was alerted on the upstream-watch branch (created on first run).
+          if ! api "repos/$REPO/branches/upstream-watch" >/dev/null 2>&1; then
+            BASE=$(api "repos/$REPO/commits/feat-readarr" | jq -r .sha)
+            curl -fsS -X POST -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" \
+              "https://api.github.com/repos/$REPO/git/refs" -d "{\"ref\":\"refs/heads/upstream-watch\",\"sha\":\"$BASE\"}" >/dev/null
+          fi
+          NEWSTATE=$(jq -n --arg r "$REL" --arg j "$JSHA" '{seerr_release:$r, jabloink_sha:$j}' | base64 -w0)
+          BODY=$(jq -n --arg c "$NEWSTATE" --arg m "watch-upstream: $REL / ${JSHA:0:7}" --arg s "${STATE_SHA:-}" \
+                 '{message:$m, content:$c, branch:"upstream-watch"} + (if $s != "" then {sha:$s} else {} end)')
+          curl -fsS -X PUT -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/$REPO/contents/state.json" -d "$BODY" >/dev/null
+          echo "State updated."
