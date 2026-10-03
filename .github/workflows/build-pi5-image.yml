@@ -1,7 +1,8 @@
 name: Build Pi 5 Docker Image
 
-# Builds an arm64 (Raspberry Pi 5 / Cortex-A76) Docker image and publishes it to
-# GHCR. Normally builds this repo's feat-readarr branch and tags it pi5-latest.
+# Builds an arm64 (Raspberry Pi 5 / Cortex-A76) Docker image natively on a
+# GitHub arm64 runner and publishes it to GHCR. Normally builds this repo's
+# feat-readarr branch and tags it pi5-latest.
 #
 # The source_repo/source_ref inputs let you build from a DIFFERENT repo/ref
 # instead (e.g. the upstream jabloink/seerr at tag v3.2.0, as a migration
@@ -36,7 +37,8 @@ concurrency:
 
 jobs:
   build-and-push:
-    runs-on: ubuntu-latest
+    # Native arm64 runner (free for public repos): no QEMU emulation, much faster.
+    runs-on: ubuntu-24.04-arm
     steps:
       - name: Resolve build source and tags
         id: resolve
@@ -79,11 +81,6 @@ jobs:
         with:
           repository: ${{ steps.resolve.outputs.source_repo }}
           ref: ${{ steps.resolve.outputs.source_ref }}
-
-      - name: Set up QEMU (for cross-building arm64 on an x86 runner)
-        uses: docker/setup-qemu-action@v3
-        with:
-          platforms: arm64
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
