@@ -41,7 +41,7 @@ jobs:
           J_JSON=$(api repos/jabloink/seerr/commits/feat-readarr)
           JSHA=$(jq -r .sha <<<"$J_JSON")
           JMSG=$(jq -r '.commit.message | split("\n")[0]' <<<"$J_JSON" | cut -c1-120)
-          JDATE=$(jq -r '.commit.author.date[0:10]' <<<"$J_JSON")
+          JDATE=$(jq -r '.commit.committer.date[0:10]' <<<"$J_JSON")
           BEHIND=$(api "repos/seerr-team/seerr/compare/develop...${OWNER}:seerr-chaptarr:feat-readarr" | jq -r .behind_by)
 
           PREV='{}'
