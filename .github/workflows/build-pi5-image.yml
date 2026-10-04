@@ -1,25 +1,29 @@
 name: Build Pi 5 Docker Image
 
 # Builds an arm64 (Raspberry Pi 5 / Cortex-A76) Docker image natively on a
-# GitHub arm64 runner and publishes it to GHCR. Normally builds this repo's
-# feat-readarr branch and tags it pi5-latest.
+# GitHub arm64 runner and publishes it to GHCR. Normally builds jabloink/seerr
+# feat-readarr (the book/Readarr branch) directly and tags it pi5-latest, so
+# picking up upstream work never needs a rebase of this fork. watch-upstream
+# starts this build automatically when that branch moves.
 #
 # The source_repo/source_ref inputs let you build from a DIFFERENT repo/ref
-# instead (e.g. the upstream jabloink/seerr at tag v3.2.0, as a migration
-# bridge when a newer build's database schema guard refuses to auto-upgrade
-# from an older one). Bridge builds never touch pi5-latest.
+# instead (e.g. jabloink/seerr at tag v3.2.0, as a migration bridge when a
+# newer build's database schema guard refuses to auto-upgrade from an older
+# one). Bridge builds never touch pi5-latest.
+#
+# Deploying is manual: Gantry excludes seerr_fork, so back up the DB and
+# update the service yourself once a build is green.
 
 on:
   push:
     branches:
       - feat-readarr
-    paths-ignore:
-      - '**.md'
-      - 'docs/**'
+    paths:
+      - '.github/workflows/build-pi5-image.yml'
   workflow_dispatch:
     inputs:
       source_repo:
-        description: 'Repo to build from (owner/name). Leave blank for this repo.'
+        description: 'Repo to build from (owner/name). Leave blank for jabloink/seerr.'
         required: false
         default: ''
       source_ref:
@@ -51,7 +55,7 @@ jobs:
             IS_BRIDGE="true"
           fi
 
-          SOURCE_REPO="${SOURCE_REPO:-${{ github.repository }}}"
+          SOURCE_REPO="${SOURCE_REPO:-jabloink/seerr}"
           SOURCE_REF="${SOURCE_REF:-feat-readarr}"
 
           # GHCR requires lowercase repository paths; github.repository preserves
@@ -67,7 +71,12 @@ jobs:
             OWNER=$(echo "$SOURCE_REPO" | cut -d/ -f1)
             VERSION_TAG="pi5-bridge-${OWNER}-${SAFE_REF}"
           else
-            VERSION_TAG="pi5-${SAFE_REF}"
+            # Pin the exact upstream commit so every build is traceable and
+            # can be redeployed later (pi5-feat-readarr-<sha7>).
+            SHA=$(curl -fsS -H "Authorization: Bearer ${{ github.token }}" \
+              "https://api.github.com/repos/$SOURCE_REPO/commits/$SOURCE_REF" | jq -r .sha)
+            SOURCE_REF="$SHA"
+            VERSION_TAG="pi5-${SAFE_REF}-${SHA:0:7}"
           fi
 
           echo "source_repo=$SOURCE_REPO" >> "$GITHUB_OUTPUT"
@@ -143,5 +152,5 @@ jobs:
                 {name: "Trigger", value: $ev, inline: true},
                 {name: "Digest", value: ("`" + ($d[0:19]) + "…`"), inline: true}
               ],
-              footer: {text: "Gantry will roll seerr_fork onto pi5-latest within ~5h"} }]
+              footer: {text: "Not deployed. Back up the seerr_fork DB, then update the service (manual; Gantry skips it)."} }]
           }' | curl -sS -m 20 -H "Content-Type: application/json" -d @- "$DISCORD_WEBHOOK_URL"
